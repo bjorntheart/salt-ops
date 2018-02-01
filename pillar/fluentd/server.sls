@@ -73,6 +73,18 @@ fluentd:
             - format: json
             - port: 9999
             - keep_time_key: 'true'
+        - directive: source
+          attrs:
+            - '@id': secure_input
+            - '@type': forward
+            - port: 5001
+            - nested_directives:
+              - directive: transport
+                directive_arg: tls
+                attrs:
+                  - cert_path: '/etc/ssl/certs/log-input.crt'
+                  - private_key_path: '/etc/ssl/certs/log-input.key'
+                  - private_key_passphrase: ''
         {# The purpose of this block is to stream data from the
         micromasters application to S3 for analysis by the
         institutional research team. If they ever need to change
