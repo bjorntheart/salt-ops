@@ -3,7 +3,6 @@
 {% set edx_tracking_bucket = 'odl-residential-tracking-data' %}
 {% set edx_tracking_bucket_creds = salt.vault.read('aws-mitx/creds/read-write-{bucket}'.format(bucket=edx_tracking_bucket)) %}
 {% set fluentd_shared_key = salt.vault.read('secret-operations/global/fluentd_shared_key').data.value %}
-{% set heroku_http_token = salt.vault.read('secret-operations/global/heroku_http_token').data.value %}
 {% set mailgun_webhooks_token = salt.vault.read('secret-operations/global/mailgun_webhooks_token').data.value %}
 {% set redash_webhook_token = salt.vault.read('secret-operations/global/redash_webhook_token').data.value %}
 {% set odl_wildcard_cert = salt.vault.read('secret-operations/global/odl_wildcard_cert') %}
@@ -21,13 +20,9 @@ fluentd:
       key_contents: |
         {{ odl_wildcard_cert.data.key|indent(8) }}
   plugins:
-    - fluent-plugin-secure-forward
-    - fluent-plugin-heroku-syslog
     - fluent-plugin-s3
+    - fluent-plugin-elasticsearch
   proxied_plugins:
-    - route: heroku-http
-      port: 9000
-      token: {{ heroku_http_token }}
     - route: mailgun-webhooks
       port: 9001
       token: {{ mailgun_webhooks_token }}
@@ -47,10 +42,15 @@ fluentd:
         - directive: source
           attrs:
             - '@id': heroku_logs_inbound
-            - '@type': heroku_syslog_http
-            - port: 9000
-            - bind: ::1
-            - format: 'none'
+            - '@type': syslog
+            - tag: heroku_logs
+            - bind: 127.0.0.1
+            - port: 5140
+            - protocol_type: tcp
+            - nested_directives:
+                - directive: parse
+                  attrs:
+                    - message_format: rfc5424
         - directive: source
           attrs:
             - '@id': mailgun-events
@@ -73,14 +73,6 @@ fluentd:
             - format: json
             - port: 9999
             - keep_time_key: 'true'
-        - directive: source
-          attrs:
-            - '@type': secure_forward
-            - port: 5001
-            - secure: 'false'
-            - cert_auto_generate: 'yes'
-            - self_hostname: {{ salt.grains.get('external_ip') }}
-            - shared_key: {{ fluentd_shared_key }}
         {# The purpose of this block is to stream data from the
         micromasters application to S3 for analysis by the
         institutional research team. If they ever need to change
@@ -99,10 +91,20 @@ fluentd:
                     - s3_bucket: {{ micromasters_ir_bucket }}
                     - s3_region: us-east-1
                     - path: logs/
-                    - buffer_path: {{ fluentd_directories.micromasters_s3_buffers }}
-                    - format: json
-                    - include_time_key: 'true'
+                    - s3_object_key_format: '%{path}%{time_slice}_%{index}.%{file_extension}'
                     - time_slice_format: '%Y-%m-%d'
+                    - nested_directives:
+                      - directive: buffer
+                        attrs:
+                          - '@type': file
+                          - path: {{ fluentd_directories.micromasters_s3_buffers }}
+                          - timekey: 3600
+                          - timekey_wait: '10m'
+                          - timekey_use_utc: 'true'
+                    - nested_directives:
+                      - directive: format
+                        attrs:
+                          - '@type': json
                 - directive: store
                   attrs:
                     - '@type': relabel
@@ -127,11 +129,6 @@ fluentd:
           attrs:
             - '@type': relabel
             - '@label': '@es_logging'
-            - nested_directives:
-                - directive: buffer
-                  attrs:
-                    - '@type': file
-                    - path: {{ fluentd_directories.universal_buffer }}
 
         - directive: label
           directive_arg: '@es_logging'
@@ -161,7 +158,11 @@ fluentd:
                   directive_arg: 'edx.tracking'
                   attrs:
                     - '@type': grep
-                    - regexp1: environment mitx-production
+                    - nested_directives:
+                      - directive: regexp
+                        attrs:
+                          - key: environment
+                          - pattern: mitx-production
                 - directive: match
                   directive_arg: edx.tracking
                   attrs:
@@ -171,11 +172,20 @@ fluentd:
                     - s3_bucket: {{ edx_tracking_bucket }}
                     - s3_region: us-east-1
                     - path: logs/
-                    - buffer_path: {{ fluentd_directories.residential_tracking_logs }}
-                    - format: json
-                    - include_time_key: 'true'
-                    - time_slice_format: '%Y-%m-%d-%H'
-
+                    - s3_object_key_format: '%{path}%{time_slice}_%{index}.%{file_extension}'
+                    - time_slice_format: '%Y-%m-%d'
+                    - nested_directives:
+                      - directive: buffer
+                        attrs:
+                          - '@type': file
+                          - path: {{ fluentd_directories.residential_tracking_logs }}
+                          - timekey: 3600
+                          - timekey_wait: '10m'
+                          - timekey_use_utc: 'true'
+                    - nested_directives:
+                      - directive: format
+                        attrs:
+                          - '@type': json
 
 beacons:
   service:
